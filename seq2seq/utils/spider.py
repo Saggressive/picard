@@ -5,7 +5,8 @@ from datasets.arrow_dataset import Dataset
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 from seq2seq.utils.dataset import DataTrainingArguments, normalize, serialize_schema
 from seq2seq.utils.trainer import Seq2SeqTrainer, EvalPrediction
-
+import copy
+import re
 
 def spider_get_input(
     question: str,
@@ -37,9 +38,161 @@ def spider_add_serialized_schema(ex: dict, data_training_args: DataTrainingArgum
         schema_serialization_with_db_id=data_training_args.schema_serialization_with_db_id,
         schema_serialization_with_db_content=data_training_args.schema_serialization_with_db_content,
         normalize_query=data_training_args.normalize_query,
+        use_instruction=data_training_args.use_instruction,
     )
     return {"serialized_schema": serialized_schema}
 
+def add_synonym(synonym_dict_path,inputs,batch):
+    with open(synonym_dict_path, "r") as f:
+        all_dict = json.load(f)
+    synonym_dict = all_dict["synonym_dict"]
+    columns_name_dict = all_dict["synonym_dict_for_sql_col"]
+    tables_name_dict = all_dict["tables_name_dict"]
+    synonym_inputs, query_synonym = [], []
+    for index, i in enumerate(inputs):
+        question_schema_list = i.split("|")
+        db_id = question_schema_list[1].strip()
+        question = question_schema_list[0].strip()
+        all_tables_columns = question_schema_list[2:]
+        new_tables_columns = []
+        query = copy.copy(batch["query"][index])
+        query = query.lower()
+        query_word = query.split(" ")
+        original_word_for_sql_col, synonym_word_for_sql_col = columns_name_dict[db_id]["original"], \
+                                                              columns_name_dict[db_id]["synonym"]
+        original_table_word, synonym_table_word = tables_name_dict[db_id]["original"], tables_name_dict[db_id][
+            "synonym"]
+        for query_index, one_query_word in enumerate(query_word):
+            one_question_word_split = None
+            if "." in one_query_word:
+                one_question_word_split = one_query_word.split(".")
+            for word_index, pattern in enumerate(original_word_for_sql_col):
+                if one_question_word_split == None:
+                    match = re.search("^" + pattern, one_query_word.lower())
+                    if match:
+                        query_word[query_index] = synonym_word_for_sql_col[word_index]
+                        # print(query_word[query_index])
+                else:
+                    split_word = one_question_word_split[1]
+                    match = re.search("^" + pattern, split_word.lower())
+                    if match:
+                        one_question_word_split[1] = synonym_word_for_sql_col[word_index]
+                        # print(one_question_word_split[1])
+                    one_query_word = ".".join(one_question_word_split)
+                    query_word[query_index] = one_query_word
+
+            if one_question_word_split != None:
+                for word_index, pattern in enumerate(original_table_word):
+                    split_word = one_question_word_split[0]
+                    match = re.search("^" + pattern, split_word.lower())
+                    if match:
+                        one_question_word_split[0] = synonym_table_word[word_index]
+                        # print(one_question_word_split[0])
+                    one_query_word = ".".join(one_question_word_split)
+                    query_word[query_index] = one_query_word
+            else:
+                for word_index, pattern in enumerate(original_table_word):  # 匹配表名，表名必不包含点(.)
+                    match = re.search("^" + pattern, one_query_word.lower())
+                    if match:
+                        query_word[query_index] = synonym_table_word[word_index]
+                        # print(query_word[query_index])
+
+        query = " ".join(query_word)
+        query_synonym.append(query)
+        flag,instruction_list=False,None
+        for tab_index, tab_col_pair in enumerate(all_tables_columns):
+            new_column_list = []
+            if ":" not in tab_col_pair:
+                # print(tab_col_pair)
+                # print("*"*20)
+                if "columns" in tab_col_pair:
+                    instruction_list=tab_col_pair.split(" ")
+                    for instruction_index,instruction_seg in enumerate(copy.deepcopy(instruction_list)):
+                        if instruction_seg=="contain":
+                            break
+                        if instruction_seg=="columns":
+                            continue
+                        col_ins=instruction_seg
+                        if col_ins in columns_name_dict[db_id]["original"]:
+                            k = columns_name_dict[db_id]["original"].index(col_ins)
+                            instruction_list[instruction_index]=columns_name_dict[db_id]["synonym"][k]
+
+                    schema_linking = " ".join(instruction_list)
+                    new_tables_columns.append(schema_linking)
+                    # print(instruction_list)
+                    # print("*" * 20)
+                    continue
+                else:
+                    continue
+            tab_col_list=tab_col_pair.split(":")
+            if len(tab_col_list)==2:
+                table_name, column = tab_col_list
+            elif len(tab_col_list)>2:
+                table_name = tab_col_pair[0]
+                column = ":".join(tab_col_pair[1:])
+            else:
+                print(tab_col_pair)
+                continue
+            columns_list = column.split(",")
+            table_name = table_name.strip()
+            columns_list = [i.strip() for i in columns_list if i != ' ']
+            if table_name in tables_name_dict[db_id]["original"]:
+                k = tables_name_dict[db_id]["original"].index(table_name)
+                new_table_name = tables_name_dict[db_id]["synonym"][k]
+            else:
+                new_table_name = table_name
+            for col_index, col in enumerate(columns_list):
+                col_value = None
+                # 针对有db_id的情况
+                if "(" in col and ")" in col:
+                    print(col)
+                    match=re.search("(.*?)\((.*)\)", col)
+                    if match!=None:
+                        col_except_value,value=match.group(1),match.group(2)
+                    else:
+                        print(col)
+                        continue
+                    col_except_value, value_bracket = col_except_value.strip(), value.strip()
+                    col_value = [col_except_value, value_bracket]
+                if col_value == None:
+                    if col in columns_name_dict[db_id]["original"]:
+                        # print(col)
+                        k = columns_name_dict[db_id]["original"].index(col)
+                        new_column_list.append(columns_name_dict[db_id]["synonym"][k])
+                    else:
+                        new_column_list.append(col)
+                else:
+                    if col_value[0] in columns_name_dict[db_id]["original"]:
+                        k = columns_name_dict[db_id]["original"].index(col_value[0])
+                        col_value[0] = columns_name_dict[db_id]["synonym"][k]
+                        col_value_string = "{column} ( {values} )".format(column=col_value[0], values=col_value[1])
+                        new_column_list.append(col_value_string)
+                    else:
+                        col_value_string = "{column} ( {values} )".format(column=col_value[0], values=col_value[1])
+                        new_column_list.append(col_value_string)
+            new_column_list=[i for i in new_column_list if i!='']
+            # print(new_column_list)
+            schema_linking = new_table_name + " : " + " , ".join(new_column_list) + " , "
+            # print(schema_linking)
+            # schema_linking = new_table_name + " : " + " , ".join(new_column_list)
+            new_tables_columns.append(schema_linking)
+        question_word = question.split(" ")
+        original_word, synonym_word = synonym_dict[db_id]["original"], synonym_dict[db_id]["synonym"]
+        for question_index, one_question_word in enumerate(question_word):
+            for word_index, pattern in enumerate(original_word):
+                match = re.search("^" + pattern, one_question_word.lower())
+                if match:
+                    if "_" in synonym_word[word_index]:  # 一些近义词word本来就有下划线
+                        except_line_word = synonym_word[word_index].split("_")
+                        except_line_word = " ".join(except_line_word)
+                        question_word[question_index] = except_line_word
+                    else:
+                        question_word[question_index] = synonym_word[word_index]
+        question = " ".join(question_word)
+        question_schema_list = [question, db_id]
+        question_schema_list.extend(new_tables_columns)
+        synonym_inputs.append(" | ".join(question_schema_list))
+    return synonym_inputs,query_synonym
 
 def spider_pre_process_function(
     batch: dict,
@@ -47,6 +200,8 @@ def spider_pre_process_function(
     max_target_length: Optional[int],
     data_training_args: DataTrainingArguments,
     tokenizer: PreTrainedTokenizerBase,
+    synonym_dict_path:str="./seq2seq/dict.txt",
+    use_synonym:bool= False
 ) -> dict:
     prefix = data_training_args.source_prefix if data_training_args.source_prefix is not None else ""
 
@@ -54,6 +209,15 @@ def spider_pre_process_function(
         spider_get_input(question=question, serialized_schema=serialized_schema, prefix=prefix)
         for question, serialized_schema in zip(batch["question"], batch["serialized_schema"])
     ]
+
+    if use_synonym:
+        synonym_inputs,query_synonym=add_synonym(synonym_dict_path, inputs, batch)
+        inputs.extend(synonym_inputs)
+        batch["query"].extend(query_synonym)
+        batch["db_id"]=batch["db_id"]*2
+        #删除多的空格
+        inputs=[" ".join(i.split()) for i in inputs]
+        batch["query"]=[" ".join(i.split()) for i in batch["query"]]
 
     model_inputs: dict = tokenizer(
         inputs,

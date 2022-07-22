@@ -125,7 +125,8 @@ class DataTrainingArguments:
         default=True,
         metadata={"help": "Whether or not to add the database id to the target. Needed for Picard."},
     )
-
+    use_synonym: bool = field(default=True, metadata={"help": "是不是要使用同义词"})
+    use_instruction: bool = field(default=True, metadata={"help": "是不是要使用prompt"})
     def __post_init__(self):
         if self.val_max_target_length is None:
             self.val_max_target_length = self.max_target_length
@@ -326,6 +327,59 @@ def prepare_splits(
         schemas=schemas
     )
 
+def prepare_splits_spider_synonym(
+    dataset_dict: DatasetDict,
+    data_args: DataArguments,
+    training_args: TrainingArguments,
+    data_training_args: DataTrainingArguments,
+    add_serialized_schema: Callable[[dict], dict],
+    pre_process_function_train: Callable[[dict, Optional[int], Optional[int]], dict],
+    pre_process_function_eval: Callable[[dict, Optional[int], Optional[int]], dict]
+) -> DatasetSplits:
+    train_split, eval_split, test_splits = None, None, None
+
+    if training_args.do_train:
+        train_split = _prepare_train_split(
+            dataset_dict["train"],
+            data_training_args=data_training_args,
+            add_serialized_schema=add_serialized_schema,
+            pre_process_function=pre_process_function_train,
+        )
+
+    if training_args.do_eval:
+        eval_split = _prepare_eval_split(
+            dataset_dict["validation"],
+            data_training_args=data_training_args,
+            add_serialized_schema=add_serialized_schema,
+            pre_process_function=pre_process_function_eval,
+        )
+
+    if training_args.do_predict:
+        test_splits = {
+            section: _prepare_eval_split(
+                dataset_dict[section],
+                data_training_args=data_training_args,
+                add_serialized_schema=add_serialized_schema,
+                pre_process_function=pre_process_function_eval,
+            )
+            for section in data_args.test_sections
+        }
+        test_split_schemas = {}
+        for split in test_splits.values():
+            test_split_schemas.update(split.schemas)
+
+    schemas = {
+        **(train_split.schemas if train_split is not None else {}),
+        **(eval_split.schemas if eval_split is not None else {}),
+        **(test_split_schemas if test_splits is not None else {}),
+    }
+
+    return DatasetSplits(
+        train_split=train_split,
+        eval_split=eval_split,
+        test_splits=test_splits,
+        schemas=schemas
+    )
 
 def normalize(query: str) -> str:
     def comma_fix(s):
@@ -354,6 +408,7 @@ def serialize_schema(
     schema_serialization_with_db_id: bool = True,
     schema_serialization_with_db_content: bool = False,
     normalize_query: bool = True,
+    use_instruction: bool = True,
 ) -> str:
     if schema_serialization_type == "verbose":
         db_id_str = "Database: {db_id}. "
@@ -375,7 +430,23 @@ def serialize_schema(
     else:
         raise NotImplementedError
 
-    def get_column_str(table_name: str, column_name: str) -> str:
+    # def get_column_str(table_name: str, column_name: str) -> str:
+    #     column_name_str = column_name.lower() if normalize_query else column_name
+    #     if schema_serialization_with_db_content:
+    #         matches = get_database_matches(
+    #             question=question,
+    #             table_name=table_name,
+    #             column_name=column_name,
+    #             db_path=(db_path + "/" + db_id + "/" + db_id + ".sqlite"),
+    #         )
+    #         if matches:
+    #             return column_str_with_values.format(column=column_name_str, values=value_sep.join(matches))
+    #         else:
+    #             return column_str_without_values.format(column=column_name_str)
+    #     else:
+    #         return column_str_without_values.format(column=column_name_str)
+
+    def get_column_str(table_name: str, column_name: str,pair_list: list) -> str:
         column_name_str = column_name.lower() if normalize_query else column_name
         if schema_serialization_with_db_content:
             matches = get_database_matches(
@@ -385,18 +456,20 @@ def serialize_schema(
                 db_path=(db_path + "/" + db_id + "/" + db_id + ".sqlite"),
             )
             if matches:
+                pair_list.append((column_name_str,value_sep.join(matches)))
+                # print(pair_list)
                 return column_str_with_values.format(column=column_name_str, values=value_sep.join(matches))
             else:
                 return column_str_without_values.format(column=column_name_str)
         else:
             return column_str_without_values.format(column=column_name_str)
-
+    pair_list = []
     tables = [
         table_str.format(
             table=table_name.lower() if normalize_query else table_name,
             columns=column_sep.join(
                 map(
-                    lambda y: get_column_str(table_name=table_name, column_name=y[1]),
+                    lambda y: get_column_str(table_name=table_name, column_name=y[1],pair_list=pair_list),
                     filter(
                         lambda y: y[0] == table_id,
                         zip(
@@ -415,4 +488,14 @@ def serialize_schema(
         serialized_schema = db_id_str.format(db_id=db_id) + table_sep.join(tables)
     else:
         serialized_schema = table_sep.join(tables)
-    return serialized_schema
+
+    if use_instruction:
+        introduction = ""
+        for i in pair_list:
+            # introduction += f"value {i[1]}is from column {i[0]} , "
+            introduction += f" | columns {i[0]} contain the value {i[1]} , "
+            # print(f"columns {i[0]} contain the value {i[1]} , ")
+        introduction += "translate natural language to SQL . "
+        return serialized_schema + introduction
+    else:
+        return serialized_schema

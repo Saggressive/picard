@@ -1,7 +1,7 @@
 # Set up logging
 import sys
 import logging
-
+sys.path.append("./")
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(name)s -   %(message)s",
     datefmt="%m/%d/%Y %H:%M:%S",
@@ -9,6 +9,8 @@ logging.basicConfig(
     level=logging.WARNING,
 )
 logger = logging.getLogger(__name__)
+
+import argparse
 
 import os
 import json
@@ -33,6 +35,12 @@ from seq2seq.utils.cosql import CoSQLTrainer
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description='Process some integers.')
+    parser.add_argument('--config_file', metavar='seq2seq/configs/train.json', type=str,
+                        default='seq2seq/configs/train.json',
+                        help='an integer for the accumulator')
+    args = parser.parse_args()
+    config_file = args.config_file
     # See all possible arguments by passing the --help flag to this script.
     parser = HfArgumentParser(
         (PicardArguments, ModelArguments, DataArguments, DataTrainingArguments, Seq2SeqTrainingArguments)
@@ -42,19 +50,22 @@ def main() -> None:
     data_args: DataArguments
     data_training_args: DataTrainingArguments
     training_args: Seq2SeqTrainingArguments
-    if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
-        # If we pass only one argument to the script and it's the path to a json file,
-        # let's parse it to get our arguments.
-        picard_args, model_args, data_args, data_training_args, training_args = parser.parse_json_file(
-            json_file=os.path.abspath(sys.argv[1])
-        )
-    elif len(sys.argv) == 3 and sys.argv[1].startswith("--local_rank") and sys.argv[2].endswith(".json"):
-        data = json.loads(Path(os.path.abspath(sys.argv[2])).read_text())
-        data.update({"local_rank": int(sys.argv[1].split("=")[1])})
-        picard_args, model_args, data_args, data_training_args, training_args = parser.parse_dict(args=data)
-    else:
-        picard_args, model_args, data_args, data_training_args, training_args = parser.parse_args_into_dataclasses()
-    
+    # if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
+    #     # If we pass only one argument to the script and it's the path to a json file,
+    #     # let's parse it to get our arguments.
+    #     picard_args, model_args, data_args, data_training_args, training_args = parser.parse_json_file(
+    #         json_file=os.path.abspath(sys.argv[1])
+    #     )
+    # elif len(sys.argv) == 3 and sys.argv[1].startswith("--local_rank") and sys.argv[2].endswith(".json"):
+    #     data = json.loads(Path(os.path.abspath(sys.argv[2])).read_text())
+    #     data.update({"local_rank": int(sys.argv[1].split("=")[1])})
+    #     picard_args, model_args, data_args, data_training_args, training_args = parser.parse_dict(args=data)
+    # else:
+    #     picard_args, model_args, data_args, data_training_args, training_args = parser.parse_args_into_dataclasses()
+
+    picard_args, model_args, data_args, data_training_args, training_args = parser.parse_json_file(
+        json_file=config_file
+    )
     # If model_name_or_path includes ??? instead of the number of steps, 
     # we load the latest checkpoint.
     if 'checkpoint-???' in model_args.model_name_or_path:

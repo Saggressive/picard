@@ -15,6 +15,7 @@ from seq2seq.utils.dataset import (
     TrainSplit,
     _prepare_train_split,
     prepare_splits,
+    prepare_splits_spider_synonym,
 )
 from seq2seq.utils.spider import spider_add_serialized_schema, spider_pre_process_function
 from seq2seq.utils.cosql import cosql_add_serialized_schema, cosql_pre_process_function
@@ -58,6 +59,23 @@ def load_dataset(
         data_training_args=data_training_args,
         tokenizer=tokenizer,
     )
+    _spider_pre_process_function_train = lambda batch, max_source_length,max_target_length: spider_pre_process_function(
+        batch=batch,
+        max_source_length=max_source_length,
+        max_target_length=max_target_length,
+        data_training_args=data_training_args,
+        tokenizer=tokenizer,
+        use_synonym=True
+    )  # train
+
+    _spider_pre_process_function_eval = lambda batch, max_source_length, max_target_length: spider_pre_process_function(
+        batch=batch,
+        max_source_length=max_source_length,
+        max_target_length=max_target_length,
+        data_training_args=data_training_args,
+        tokenizer=tokenizer,
+        use_synonym=False
+    )  # eval
 
     _cosql_dataset_dict: Callable[[], DatasetDict] = lambda: datasets.load.load_dataset(
         path=data_args.dataset_paths["cosql"], cache_dir=model_args.cache_dir
@@ -106,12 +124,22 @@ def load_dataset(
 
     if data_args.dataset == "spider":
         metric = _spider_metric()
-        dataset_splits = prepare_splits(
-            dataset_dict=_spider_dataset_dict(),
-            add_serialized_schema=_spider_add_serialized_schema,
-            pre_process_function=_spider_pre_process_function,
-            **_prepare_splits_kwargs,
-        )
+
+        if data_training_args.use_synonym:
+            dataset_splits = prepare_splits_spider_synonym(
+                dataset_dict=_spider_dataset_dict(),
+                add_serialized_schema=_spider_add_serialized_schema,
+                pre_process_function_train=_spider_pre_process_function_train,
+                pre_process_function_eval=_spider_pre_process_function_eval,
+                **_prepare_splits_kwargs,
+            )
+        else:
+            dataset_splits = prepare_splits(
+                dataset_dict=_spider_dataset_dict(),
+                add_serialized_schema=_spider_add_serialized_schema,
+                pre_process_function=_spider_pre_process_function,
+                **_prepare_splits_kwargs,
+            )
     elif data_args.dataset == "cosql":
         metric = _cosql_metric()
         dataset_splits = prepare_splits(
